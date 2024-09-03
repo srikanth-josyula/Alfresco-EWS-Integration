@@ -1,9 +1,148 @@
-In the context of Alfresco, the process of handling inbound emails typically involves:
+public int readAndForwardEmailsWithOAuth(String captureUserName, String captureUserMail, String accessToken) {
+    ExchangeService outlookService = null;
+    AlfInboundService alfInboundService = new AlfInboundService();
+    Folder destinationFolder = null;
 
-Email Capture: Alfresco provides features to capture incoming emails, extract metadata, and save email messages and attachments as documents within the repository.
-Metadata Extraction: Alfresco can extract information from the email, such as sender, recipient, subject, date, and any custom metadata, and associate it with the saved document.
-Content Storage: The captured emails and attachments are stored as content in the Alfresco repository, allowing users to search, manage, and collaborate on them like any other document.
-Workflow and Collaboration: Once emails are in the repository, Alfresco's workflow and collaboration features can be used to initiate processes, approvals, and discussions based on the captured email content.
-Search and Retrieval: Emails and their content become searchable within the Alfresco system, enabling users to find specific email documents based on their metadata and content.
-Security and Access Control: Alfresco's access control mechanisms ensure that only authorized users can access and interact with the captured email documents.
-Integration: Alfresco can integrate with various email servers and clients to facilitate the capture of inbound emails, including Microsoft Exchange servers.
+    try {
+        outlookService = new ConnectionsUtil().createOutlookConnectionWithOAuth(captureUserMail, accessToken);
+
+        if (CommonConstants.DESTINATION_MOVE_ENABLE) {
+            destinationFolder = setupDestinationFolder(outlookService, alfInboundService, captureUserName);
+            if (destinationFolder == null) {
+                return 0; // If destination folder setup fails, return early.
+            }
+        }
+
+        List<Item> emails = fetchEmailsFromInbox(outlookService);
+        if (emails.isEmpty()) {
+            logger.info("No Mails were found under Inbox for user " + captureUserName);
+            return 0;
+        }
+
+        for (Item email : emails) {
+            processAndForwardEmail(email, outlookService, alfInboundService, captureUserName, destinationFolder);
+        }
+
+        return emails.size();
+    } catch (Exception e) {
+        handleException(e, alfInboundService, captureUserName);
+        return 0;
+    }
+}
+
+private Folder setupDestinationFolder(ExchangeService outlookService, AlfInboundService alfInboundService, String captureUserName) {
+    try {
+        Folder rootFolder = Folder.bind(outlookService, WellKnownFolderName.MsgFolderRoot);
+        List<Folder> rootFolders = rootFolder.findFolders(new FolderView(1000)).getFolders();
+
+        for (Folder folder : rootFolders) {
+            if (CommonConstants.DESTINATION_FOLDER.equalsIgnoreCase(folder.getDisplayName())) {
+                logger.debug("Setting up the folder for moving: " + folder.getDisplayName());
+                return folder;
+            }
+        }
+
+        logAndNotifyMissingFolder(alfInboundService, captureUserName);
+    } catch (Exception e) {
+        logger.error("Error setting up destination folder: " + e.getMessage());
+    }
+    return null;
+}
+
+private List<Item> fetchEmailsFromInbox(ExchangeService outlookService) throws Exception {
+    Folder inboxFolder = Folder.bind(outlookService, WellKnownFolderName.Inbox);
+    ItemView itemView = new ItemView(Integer.MAX_VALUE);
+    itemView.getOrderBy().add(ItemSchema.DateTimeReceived, SortDirection.Descending);
+
+    return outlookService.findItems(inboxFolder.getId(), itemView).getItems();
+}
+
+private void processAndForwardEmail(Item email, ExchangeService outlookService, AlfInboundService alfInboundService, String captureUserName, Folder destinationFolder) {
+    try {
+        email = Item.bind(outlookService, email.getId(), new PropertySet(BasePropertySet.FirstClassProperties, BodyType.Text));
+
+        String subject = email.getSubject();
+        String body = email.getBody().toString();
+        Date sentDate = email.getDateTimeReceived();
+
+        logger.info("Reading message under Inbox with subject: " + subject);
+
+        Set<String> allRecipientsList = getAllRecipients(email, captureUserName);
+        String sender = EmailMessage.bind(outlookService, email.getId()).getFrom().getAddress().toString();
+
+        boolean isSent = alfInboundService.sendEmails(sender, captureUserName, String.join(",", allRecipientsList), subject, body, getAttachments(email), captureUserName, sentDate);
+
+        if (CommonConstants.DESTINATION_MOVE_ENABLE && destinationFolder != null && isSent) {
+            moveEmailToDestinationFolder(email, destinationFolder, subject, alfInboundService, captureUserName);
+        }
+    } catch (Exception e) {
+        logger.error("Error processing email: " + ExceptionUtils.getStackTrace(e));
+    }
+}
+
+private Set<String> getAllRecipients(Item email, String captureUserName) throws Exception {
+    Set<String> allRecipientsList = new TreeSet<>();
+    List<EmailAddress> recipientsList = new ArrayList<>();
+
+    EmailMessage emailMessage = EmailMessage.bind(outlookService, email.getId());
+    recipientsList.addAll(emailMessage.getBccRecipients().getItems());
+    recipientsList.addAll(emailMessage.getCcRecipients().getItems());
+    recipientsList.addAll(emailMessage.getToRecipients().getItems());
+    recipientsList.add(emailMessage.getFrom());
+
+    for (EmailAddress recipient : recipientsList) {
+        allRecipientsList.add(recipient.getAddress().toString());
+        if (recipient.getName().contains(captureUserName)) {
+            allRecipientsList.remove(recipient.getAddress().toString());
+        }
+    }
+
+    return allRecipientsList;
+}
+
+private List<Attachments> getAttachments(Item email) throws Exception {
+    List<Attachments> attachmentsList = new ArrayList<>();
+    if (email.getAttachments().getCount() != 0) {
+        for (Attachment attachment : email.getAttachments().getItems()) {
+            if (attachment instanceof FileAttachment) {
+                FileAttachment fileAttachment = (FileAttachment) attachment;
+                fileAttachment.load();
+                Attachments attachmentObj = new Attachments();
+                attachmentObj.setByteArry(fileAttachment.getContent());
+                attachmentObj.setMimeType(fileAttachment.getContentType());
+                attachmentObj.setFileName(fileAttachment.getName());
+                attachmentsList.add(attachmentObj);
+            }
+        }
+    }
+    return attachmentsList;
+}
+
+private void moveEmailToDestinationFolder(Item email, Folder destinationFolder, String subject, AlfInboundService alfInboundService, String captureUserName) {
+    try {
+        logger.info("Moving message with subject: " + subject + " to " + destinationFolder.getDisplayName());
+        email.move(destinationFolder.getId());
+    } catch (Exception e) {
+        logger.error("Exception occurred, not moving the mail: " + ExceptionUtils.getStackTrace(e));
+        alfInboundService.sendEmails(
+                "Issue Encountered While Moving Emails of " + captureUserName + " To " + CommonConstants.DESTINATION_FOLDER,
+                CommonConstants.ALF_OUTBOUND_MSG_BODY + "\r\n" + ExceptionUtils.getStackTrace(e) + "\r\n\r\nThanks,\nAlfresco Team"
+        );
+    }
+}
+
+private void logAndNotifyMissingFolder(AlfInboundService alfInboundService, String captureUserName) {
+    logger.error("No folder with name " + CommonConstants.DESTINATION_FOLDER + " is present!");
+    alfInboundService.sendEmails(
+            "Issue Encountered While Moving Emails of " + captureUserName + " To " + CommonConstants.DESTINATION_FOLDER,
+            CommonConstants.ALF_OUTBOUND_MSG_BODY + "\r\n" + "No folder with name " + CommonConstants.DESTINATION_FOLDER + " is present!" + "\r\n\r\nThanks,\nAlfresco Team"
+    );
+}
+
+private void handleException(Exception e, AlfInboundService alfInboundService, String captureUserName) {
+    logger.error("Exception: " + ExceptionUtils.getStackTrace(e));
+    alfInboundService.sendEmails(
+            "Issue Encountered While Moving Emails of " + captureUserName + " to " + CommonConstants.DESTINATION_FOLDER,
+            CommonConstants.ALF_OUTBOUND_MSG_BODY + "\r\n\r\nException: " + ExceptionUtils.getMessage(e) + "\r\n\r\nThanks,\nAlfresco Team"
+    );
+}
