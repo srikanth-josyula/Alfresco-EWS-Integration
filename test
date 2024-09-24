@@ -1,9 +1,0 @@
-In the context of Alfresco, the process of handling inbound emails typically involves:
-
-Email Capture: Alfresco provides features to capture incoming emails, extract metadata, and save email messages and attachments as documents within the repository.
-Metadata Extraction: Alfresco can extract information from the email, such as sender, recipient, subject, date, and any custom metadata, and associate it with the saved document.
-Content Storage: The captured emails and attachments are stored as content in the Alfresco repository, allowing users to search, manage, and collaborate on them like any other document.
-Workflow and Collaboration: Once emails are in the repository, Alfresco's workflow and collaboration features can be used to initiate processes, approvals, and discussions based on the captured email content.
-Search and Retrieval: Emails and their content become searchable within the Alfresco system, enabling users to find specific email documents based on their metadata and content.
-Security and Access Control: Alfresco's access control mechanisms ensure that only authorized users can access and interact with the captured email documents.
-Integration: Alfresco can integrate with various email servers and clients to facilitate the capture of inbound emails, including Microsoft Exchange servers.
